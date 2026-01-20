@@ -1,0 +1,109 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: forkalytics-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-forkalytics}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-forkalytics_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-forkalytics}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forkalytics}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: forkalytics-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: forkalytics-api
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@postgres:5432/${POSTGRES_DB:-forkalytics}
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: forkalytics-worker
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@postgres:5432/${POSTGRES_DB:-forkalytics}
+      REDIS_URL: redis://redis:6379/0
+      MASTODON_INSTANCE: ${MASTODON_INSTANCE:-https://mastodon.social}
+      MASTODON_ACCESS_TOKEN: ${MASTODON_ACCESS_TOKEN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: forkalytics-scheduler
+    command: python scheduler.py
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@postgres:5432/${POSTGRES_DB:-forkalytics}
+      REDIS_URL: redis://redis:6379/0
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-15-preview}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: forkalytics-web
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    environment:
+      VITE_API_URL: http://localhost:8000
+
+volumes:
+  postgres_data:
+  redis_data:
