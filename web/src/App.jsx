@@ -123,6 +123,7 @@ const ChefHatIcon = ({ className = "w-6 h-6" }) => (
 
 function App() {
   const [stats, setStats] = useState(null)
+  const [overview, setOverview] = useState(null)
   const [popularPosts, setPopularPosts] = useState([])
   const [hourlyStats, setHourlyStats] = useState([])
   const [trendingHashtags, setTrendingHashtags] = useState([])
@@ -146,8 +147,9 @@ function App() {
 
   const fetchData = async () => {
     try {
-      const [statsRes, postsRes, hourlyRes, hashtagsRes, summariesRes, topicsRes] = await Promise.all([
+      const [statsRes, overviewRes, postsRes, hourlyRes, hashtagsRes, summariesRes, topicsRes] = await Promise.all([
         fetch(`${API_URL}/api/stats`),
+        fetch(`${API_URL}/api/stats/overview`),
         fetch(`${API_URL}/api/posts/popular?hours=24&limit=10`),
         fetch(`${API_URL}/api/stats/hourly?hours=24`),
         fetch(`${API_URL}/api/hashtags/trending?hours=24&limit=10`),
@@ -156,6 +158,7 @@ function App() {
       ])
 
       if (statsRes.ok) setStats(await statsRes.json())
+      if (overviewRes.ok) setOverview(await overviewRes.json())
       if (postsRes.ok) setPopularPosts(await postsRes.json())
       if (hourlyRes.ok) setHourlyStats(await hourlyRes.json())
       if (hashtagsRes.ok) setTrendingHashtags(await hashtagsRes.json())
@@ -431,6 +434,110 @@ function App() {
       {/* Overview Tab */}
       {activeTab === 'overview' && (
         <div className="space-y-6">
+          {/* Instance Stats Banner */}
+          {overview?.instance_name && (
+            <div className="card bg-gradient-to-r from-purple-900/50 to-blue-900/50 border-purple-500/30">
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-purple-500/20 rounded-lg">
+                    <ChefHatIcon className="w-6 h-6 text-purple-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-semibold text-purple-300">{overview.instance_name}</h3>
+                    <p className="text-sm text-gray-400">Instance Statistics</p>
+                  </div>
+                </div>
+                <div className="flex gap-6 flex-wrap">
+                  {overview.instance_user_count != null && (
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-blue-400">{overview.instance_user_count.toLocaleString()}</div>
+                      <div className="text-xs text-gray-400">Registered Users</div>
+                    </div>
+                  )}
+                  {overview.instance_active_month != null && (
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-green-400">{overview.instance_active_month.toLocaleString()}</div>
+                      <div className="text-xs text-gray-400">Registered Users</div>
+                    </div>
+                  )}
+                  {overview.instance_status_count != null && (
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-purple-400">{overview.instance_status_count.toLocaleString()}</div>
+                      <div className="text-xs text-gray-400">Total Statuses</div>
+                    </div>
+                  )}
+                  {overview.instance_domain_count != null && (
+                    <div className="text-center">
+                      <div className="text-2xl font-bold text-yellow-400">{overview.instance_domain_count.toLocaleString()}</div>
+                      <div className="text-xs text-gray-400">Known Domains</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* User Stats Row */}
+          {overview && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="stat-card relative overflow-hidden group hover:border-blue-500/50 transition-colors">
+                <div className="absolute -right-4 -bottom-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                  <ChefHatIcon className="w-20 h-20 text-blue-400" />
+                </div>
+                <div className="flex items-center gap-3 mb-2">
+                  <ChefHatIcon className="w-5 h-5 text-blue-400" />
+                  <span className="text-gray-400 text-sm">Tracked Users</span>
+                </div>
+                <div className="text-3xl font-bold">{overview.total_users.toLocaleString()}</div>
+                <div className="text-sm text-gray-500 mt-1">
+                  {overview.human_count.toLocaleString()} humans, {overview.bot_count.toLocaleString()} bots
+                </div>
+              </div>
+
+              <div className="stat-card relative overflow-hidden group hover:border-green-500/50 transition-colors">
+                <div className="absolute -right-4 -bottom-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                  <WhiskIcon className="w-20 h-20 text-green-400" />
+                </div>
+                <div className="flex items-center gap-3 mb-2">
+                  <WhiskIcon className="w-5 h-5 text-green-400" />
+                  <span className="text-gray-400 text-sm">Active Users</span>
+                </div>
+                <div className="text-3xl font-bold">{overview.active_users.toLocaleString()}</div>
+                <div className="text-sm text-gray-500 mt-1">
+                  Posted in last {overview.activity_window_hours}h
+                </div>
+              </div>
+
+              <div className="stat-card relative overflow-hidden group hover:border-purple-500/50 transition-colors">
+                <div className="absolute -right-4 -bottom-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                  <PlateIcon className="w-20 h-20 text-purple-400" />
+                </div>
+                <div className="flex items-center gap-3 mb-2">
+                  <PlateIcon className="w-5 h-5 text-purple-400" />
+                  <span className="text-gray-400 text-sm">Recent Posts</span>
+                </div>
+                <div className="text-3xl font-bold">{overview.recent_posts.toLocaleString()}</div>
+                <div className="text-sm text-gray-500 mt-1">
+                  Last {overview.activity_window_hours}h
+                </div>
+              </div>
+
+              <div className="stat-card relative overflow-hidden group hover:border-yellow-500/50 transition-colors">
+                <div className="absolute -right-4 -bottom-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                  <SpatulaIcon className="w-20 h-20 text-yellow-400" />
+                </div>
+                <div className="flex items-center gap-3 mb-2">
+                  <SpatulaIcon className="w-5 h-5 text-yellow-400" />
+                  <span className="text-gray-400 text-sm">Avg Engagement</span>
+                </div>
+                <div className="text-3xl font-bold">{overview.avg_engagement.toFixed(1)}</div>
+                <div className="text-sm text-gray-500 mt-1">
+                  Last {overview.activity_window_hours}h
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Stats Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="stat-card relative overflow-hidden group hover:border-blue-500/50 transition-colors">

@@ -38,6 +38,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@forkalytics-db:5432/${POSTGRES_DB:-forkalytics}
       REDIS_URL: redis://redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      MASTODON_INSTANCE: ${MASTODON_INSTANCE:-https://mastodon.social}
     ports:
       - "8000:8000"
     networks:

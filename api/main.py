@@ -5,7 +5,8 @@ FastAPI backend for analytics endpoints
 import os
 import sys
 import json
-from datetime import datetime, timedelta
+import httpx
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 
 from fastapi import FastAPI, Depends, Query, HTTPException
@@ -18,6 +19,9 @@ from pydantic import BaseModel
 sys.path.insert(0, "/app")
 from shared.database import get_db, init_db
 from shared.models import MastodonPost, MastodonAccount, PostSentiment, DailySummary, HourlyStat, HourlyTopic
+
+# Configuration
+MASTODON_INSTANCE = os.getenv("MASTODON_INSTANCE", "https://mastodon.social")
 
 # Initialize FastAPI
 app = FastAPI(
@@ -113,6 +117,23 @@ class HashtagCount(BaseModel):
     count: int
 
 
+class OverviewStats(BaseModel):
+    total_users: int
+    active_users: int
+    total_posts: int
+    recent_posts: int
+    avg_engagement: float
+    bot_count: int
+    human_count: int
+    activity_window_hours: int
+    # Instance stats from Mastodon API
+    instance_user_count: Optional[int] = None
+    instance_status_count: Optional[int] = None
+    instance_domain_count: Optional[int] = None
+    instance_active_month: Optional[int] = None
+    instance_name: Optional[str] = None
+
+
 class StatsOverview(BaseModel):
     total_posts: int
     total_accounts: int
@@ -177,6 +198,84 @@ async def get_stats(db: Session = Depends(get_db)):
             neutral_count=sentiment_query.neutral or 0,
             total_analyzed=sentiment_query.total or 0
         )
+    )
+
+
+# User overview stats
+@app.get("/api/stats/overview", response_model=OverviewStats)
+async def get_overview_stats(db: Session = Depends(get_db)):
+    """Get overview statistics including user counts"""
+    now = datetime.now(timezone.utc)
+    last_48_hours = now - timedelta(hours=48)
+    
+    # Total users (accounts we've seen)
+    total_users = db.query(func.count(MastodonAccount.id)).scalar() or 0
+    
+    # Active users (posted in last 48 hours)
+    active_users = db.query(func.count(func.distinct(MastodonPost.account_id))).filter(
+        MastodonPost.created_at >= last_48_hours
+    ).scalar() or 0
+    
+    # Total posts
+    total_posts = db.query(func.count(MastodonPost.id)).scalar() or 0
+    
+    # Posts in last 48 hours
+    recent_posts = db.query(func.count(MastodonPost.id)).filter(
+        MastodonPost.created_at >= last_48_hours
+    ).scalar() or 0
+    
+    # Average engagement score (last 48 hours)
+    avg_engagement = db.query(func.avg(MastodonPost.engagement_score)).filter(
+        MastodonPost.created_at >= last_48_hours
+    ).scalar() or 0
+    
+    # Bot vs human breakdown
+    bot_count = db.query(func.count(MastodonAccount.id)).filter(
+        MastodonAccount.bot == True
+    ).scalar() or 0
+    
+    human_count = total_users - bot_count
+    
+    # Fetch instance stats from Mastodon API
+    instance_user_count = None
+    instance_status_count = None
+    instance_domain_count = None
+    instance_active_month = None
+    instance_name = None
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{MASTODON_INSTANCE}/api/v2/instance")
+            if response.status_code == 200:
+                data = response.json()
+                instance_name = data.get("title") or data.get("domain")
+                
+                # Stats are in different places depending on API version
+                stats = data.get("stats", {})
+                usage = data.get("usage", {})
+                
+                instance_user_count = stats.get("user_count")
+                instance_status_count = stats.get("status_count")
+                instance_domain_count = stats.get("domain_count")
+                instance_active_month = usage.get("users", {}).get("active_month")
+    except Exception as e:
+        # Log but don't fail if we can't reach the instance API
+        print(f"Warning: Could not fetch instance stats: {e}")
+    
+    return OverviewStats(
+        total_users=total_users,
+        active_users=active_users,
+        total_posts=total_posts,
+        recent_posts=recent_posts,
+        avg_engagement=round(float(avg_engagement), 2),
+        bot_count=bot_count,
+        human_count=human_count,
+        activity_window_hours=48,
+        instance_user_count=instance_user_count,
+        instance_status_count=instance_status_count,
+        instance_domain_count=instance_domain_count,
+        instance_active_month=instance_active_month,
+        instance_name=instance_name
     )
 
 
