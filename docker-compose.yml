@@ -37,7 +37,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@forkalytics-db:5432/${POSTGRES_DB:-forkalytics}
       REDIS_URL: redis://redis:6379/0
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "8000:8000"
     networks:
@@ -59,8 +59,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@postgres:5432/${POSTGRES_DB:-forkalytics}
       REDIS_URL: redis://redis:6379/0
       MASTODON_INSTANCE: ${MASTODON_INSTANCE:-https://mastodon.social}
-      MASTODON_ACCESS_TOKEN: ${MASTODON_ACCESS_TOKEN}
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      MASTODON_ACCESS_TOKEN: ${MASTODON_ACCESS_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-15-preview}
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,11 +85,11 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@postgres:5432/${POSTGRES_DB:-forkalytics}
       REDIS_URL: redis://redis:6379/0
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
-      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
-      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
-      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-15-preview}
     depends_on:
       postgres:

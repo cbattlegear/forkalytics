@@ -31,14 +31,14 @@ logger = logging.getLogger("analytics_scheduler")
 # Initialize VADER sentiment analyzer (runs locally, no API needed)
 vader_analyzer = SentimentIntensityAnalyzer()
 
-# Configuration
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Configuration - treat empty strings as None
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or None
 SENTIMENT_BATCH_SIZE = 100  # Can process more since VADER is fast
 
-# Azure OpenAI Configuration
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT")  # Deployment name for the model
+# Azure OpenAI Configuration - treat empty strings as None
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT") or None
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY") or None
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT") or None  # Deployment name for the model
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
 
 # Model name (used for standard OpenAI, ignored for Azure where deployment is used)
@@ -65,7 +65,17 @@ elif OPENAI_API_KEY:
     client = openai.OpenAI(api_key=OPENAI_API_KEY)
     logger.info(f"Using standard OpenAI with model: {OPENAI_MODEL}")
 else:
-    logger.warning("No OpenAI configuration found. Sentiment analysis and summaries will be disabled.")
+    # Log which configuration is missing to help debugging
+    logger.info("No OpenAI API configured. AI-powered summaries will be disabled (VADER sentiment still works).")
+    if AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_API_KEY or AZURE_OPENAI_DEPLOYMENT:
+        missing = []
+        if not AZURE_OPENAI_ENDPOINT:
+            missing.append("AZURE_OPENAI_ENDPOINT")
+        if not AZURE_OPENAI_API_KEY:
+            missing.append("AZURE_OPENAI_API_KEY")
+        if not AZURE_OPENAI_DEPLOYMENT:
+            missing.append("AZURE_OPENAI_DEPLOYMENT")
+        logger.info(f"Partial Azure config detected. Missing: {', '.join(missing)}")
 
 
 def analyze_sentiment_batch():
@@ -126,21 +136,30 @@ def analyze_sentiment_batch():
         logger.info(f"Completed sentiment analysis: {analyzed_count} posts analyzed")
 
 
-def generate_hourly_stats():
-    """Aggregate hourly statistics"""
+def generate_hourly_stats(target_hour: datetime = None, force: bool = False):
+    """Aggregate hourly statistics for a specific hour or the last complete hour"""
     with get_db_session() as db:
-        # Get the last complete hour
-        now = datetime.utcnow()
-        current_hour = now.replace(minute=0, second=0, microsecond=0)
-        last_hour = current_hour - timedelta(hours=1)
+        # Determine which hour to process
+        if target_hour:
+            hour_start = target_hour.replace(minute=0, second=0, microsecond=0)
+        else:
+            now = datetime.utcnow()
+            current_hour = now.replace(minute=0, second=0, microsecond=0)
+            hour_start = current_hour - timedelta(hours=1)
+        
+        hour_end = hour_start + timedelta(hours=1)
         
         # Check if we already have stats for this hour
-        existing = db.query(HourlyStat).filter(HourlyStat.hour == last_hour).first()
+        existing = db.query(HourlyStat).filter(HourlyStat.hour == hour_start).first()
         if existing:
-            logger.debug(f"Stats already exist for {last_hour}")
-            return
+            if force:
+                db.delete(existing)
+                logger.info(f"Deleted existing stats for {hour_start} (force mode)")
+            else:
+                logger.debug(f"Stats already exist for {hour_start}")
+                return
         
-        # Aggregate posts from last hour
+        # Aggregate posts from the hour
         stats = db.query(
             func.count(MastodonPost.id).label("post_count"),
             func.sum(MastodonPost.reblogs_count).label("reblog_count"),
@@ -148,23 +167,23 @@ def generate_hourly_stats():
             func.sum(MastodonPost.engagement_score).label("total_engagement"),
             func.avg(MastodonPost.engagement_score).label("avg_engagement")
         ).filter(
-            MastodonPost.created_at >= last_hour,
-            MastodonPost.created_at < current_hour
+            MastodonPost.created_at >= hour_start,
+            MastodonPost.created_at < hour_end
         ).first()
         
         # Get average sentiment
         sentiment_avg = db.query(
             func.avg(PostSentiment.sentiment_score)
         ).join(MastodonPost).filter(
-            MastodonPost.created_at >= last_hour,
-            MastodonPost.created_at < current_hour
+            MastodonPost.created_at >= hour_start,
+            MastodonPost.created_at < hour_end
         ).scalar()
         
         # Get top hashtag (requires unnesting JSON array - simplified approach)
         # For PostgreSQL, this would use json_array_elements
         
         hourly_stat = HourlyStat(
-            hour=last_hour,
+            hour=hour_start,
             post_count=stats.post_count or 0,
             reblog_count=int(stats.reblog_count or 0),
             reply_count=int(stats.reply_count or 0),
@@ -174,40 +193,49 @@ def generate_hourly_stats():
         )
         
         db.add(hourly_stat)
-        logger.info(f"Generated hourly stats for {last_hour}: {stats.post_count} posts")
+        logger.info(f"Generated hourly stats for {hour_start}: {stats.post_count} posts")
 
 
-def extract_hourly_topics():
-    """Extract trending topics from post content using AI"""
+def extract_hourly_topics(target_hour: datetime = None, force: bool = False):
+    """Extract trending topics from post content using AI for a specific hour"""
     if not client:
         logger.warning("OpenAI API key not configured, skipping topic extraction")
         return
     
     with get_db_session() as db:
-        # Get the last complete hour
-        now = datetime.utcnow()
-        current_hour = now.replace(minute=0, second=0, microsecond=0)
-        last_hour = current_hour - timedelta(hours=1)
+        # Determine which hour to process
+        if target_hour:
+            hour_start = target_hour.replace(minute=0, second=0, microsecond=0)
+        else:
+            now = datetime.utcnow()
+            current_hour = now.replace(minute=0, second=0, microsecond=0)
+            hour_start = current_hour - timedelta(hours=1)
+        
+        hour_end = hour_start + timedelta(hours=1)
         
         # Check if we already have topics for this hour
-        existing = db.query(HourlyTopic).filter(HourlyTopic.hour_start == last_hour).first()
+        existing = db.query(HourlyTopic).filter(HourlyTopic.hour_start == hour_start).first()
         if existing:
-            logger.debug(f"Topics already exist for {last_hour}")
-            return
+            if force:
+                db.query(HourlyTopic).filter(HourlyTopic.hour_start == hour_start).delete()
+                logger.info(f"Deleted existing topics for {hour_start} (force mode)")
+            else:
+                logger.debug(f"Topics already exist for {hour_start}")
+                return
         
-        # Get posts from last hour, ordered by engagement
+        # Get posts from the hour, ordered by engagement
         posts = db.query(MastodonPost).filter(
-            MastodonPost.created_at >= last_hour,
-            MastodonPost.created_at < current_hour,
+            MastodonPost.created_at >= hour_start,
+            MastodonPost.created_at < hour_end,
             MastodonPost.content_text != None,
             MastodonPost.content_text != ""
         ).order_by(desc(MastodonPost.engagement_score)).limit(200).all()
         
         if len(posts) < 10:
-            logger.info(f"Not enough posts for topic extraction ({len(posts)} posts)")
+            logger.info(f"Not enough posts for topic extraction ({len(posts)} posts) for hour {hour_start}")
             return
         
-        logger.info(f"Extracting topics from {len(posts)} posts for hour {last_hour}")
+        logger.info(f"Extracting topics from {len(posts)} posts for hour {hour_start}")
         
         # Prepare content for OpenAI
         posts_text = "\n---\n".join([
@@ -252,7 +280,7 @@ def extract_hourly_topics():
             topics_added = 0
             for topic_data in data.get("topics", []):
                 topic = HourlyTopic(
-                    hour_start=last_hour,
+                    hour_start=hour_start,
                     topic=topic_data.get("topic", "Unknown"),
                     summary=topic_data.get("summary"),
                     post_count=len(topic_data.get("post_ids", [])),
@@ -262,7 +290,7 @@ def extract_hourly_topics():
                 db.add(topic)
                 topics_added += 1
             
-            logger.info(f"Extracted {topics_added} topics for hour {last_hour}")
+            logger.info(f"Extracted {topics_added} topics for hour {hour_start}")
             
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse topic extraction response: {e}")
@@ -270,22 +298,31 @@ def extract_hourly_topics():
             logger.error(f"Error extracting topics: {e}")
 
 
-def generate_daily_summary():
-    """Generate AI daily summary"""
+def generate_daily_summary(target_date: datetime = None, force: bool = False):
+    """Generate AI daily summary for a specific date or yesterday"""
     if not client:
         logger.warning("OpenAI API key not configured, skipping daily summary")
         return
     
     with get_db_session() as db:
-        # Get yesterday's date
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        yesterday = today - timedelta(days=1)
+        # Determine which day to process
+        if target_date:
+            day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            day_start = today - timedelta(days=1)
+        
+        day_end = day_start + timedelta(days=1)
         
         # Check if summary already exists
-        existing = db.query(DailySummary).filter(DailySummary.date == yesterday).first()
+        existing = db.query(DailySummary).filter(DailySummary.date == day_start).first()
         if existing:
-            logger.info(f"Daily summary already exists for {yesterday.date()}")
-            return
+            if force:
+                db.delete(existing)
+                logger.info(f"Deleted existing summary for {day_start.date()} (force mode)")
+            else:
+                logger.info(f"Daily summary already exists for {day_start.date()}")
+                return
         
         # Gather statistics
         post_stats = db.query(
@@ -293,8 +330,8 @@ def generate_daily_summary():
             func.sum(MastodonPost.engagement_score).label("total_engagement"),
             func.count(func.distinct(MastodonPost.account_id)).label("unique_authors")
         ).filter(
-            MastodonPost.created_at >= yesterday,
-            MastodonPost.created_at < today
+            MastodonPost.created_at >= day_start,
+            MastodonPost.created_at < day_end
         ).first()
         
         # Sentiment breakdown
@@ -304,14 +341,14 @@ def generate_daily_summary():
             func.count().filter(PostSentiment.sentiment_label == "negative").label("negative_count"),
             func.count().filter(PostSentiment.sentiment_label == "neutral").label("neutral_count")
         ).join(MastodonPost).filter(
-            MastodonPost.created_at >= yesterday,
-            MastodonPost.created_at < today
+            MastodonPost.created_at >= day_start,
+            MastodonPost.created_at < day_end
         ).first()
         
         # Get top posts for context
         top_posts = db.query(MastodonPost).filter(
-            MastodonPost.created_at >= yesterday,
-            MastodonPost.created_at < today
+            MastodonPost.created_at >= day_start,
+            MastodonPost.created_at < day_end
         ).order_by(desc(MastodonPost.engagement_score)).limit(20).all()
         
         # Prepare content for AI summary
@@ -367,7 +404,7 @@ def generate_daily_summary():
             ai_result = json.loads(result_text)
             
             summary = DailySummary(
-                date=yesterday,
+                date=day_start,
                 total_posts=post_stats.total_posts or 0,
                 total_engagement=int(post_stats.total_engagement or 0),
                 unique_authors=post_stats.unique_authors or 0,
@@ -381,7 +418,7 @@ def generate_daily_summary():
             )
             
             db.add(summary)
-            logger.info(f"Generated daily summary for {yesterday.date()}")
+            logger.info(f"Generated daily summary for {day_start.date()}")
             
         except Exception as e:
             logger.error(f"Error generating daily summary: {e}")
