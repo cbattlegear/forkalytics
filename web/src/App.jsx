@@ -28,6 +28,35 @@ import {
 
 const API_URL = import.meta.env.VITE_API_URL || ''
 
+// Helper to parse UTC dates from the API and convert to local time
+// API returns dates without timezone info but they are UTC
+const parseUTCDate = (dateString) => {
+  if (!dateString) return null
+  // If the date string doesn't have timezone info, treat it as UTC
+  const hasTimezone = dateString.includes('Z') || dateString.includes('+') || dateString.includes('-', 10)
+  const utcString = hasTimezone ? dateString : dateString + 'Z'
+  return new Date(utcString)
+}
+
+// Format a UTC date string to local time
+const formatLocalDateTime = (dateString, options = {}) => {
+  const date = parseUTCDate(dateString)
+  if (!date) return ''
+  return date.toLocaleString(undefined, options)
+}
+
+const formatLocalDate = (dateString, options = {}) => {
+  const date = parseUTCDate(dateString)
+  if (!date) return ''
+  return date.toLocaleDateString(undefined, options)
+}
+
+const formatLocalHour = (dateString) => {
+  const date = parseUTCDate(dateString)
+  if (!date) return ''
+  return date.getHours() + ':00'
+}
+
 // Custom Utensil Icons
 const ForkIcon = ({ className = "w-6 h-6" }) => (
   <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -327,7 +356,7 @@ function App() {
                 
                 <div className="px-3 py-1 bg-gray-800 rounded-lg text-sm flex items-center gap-2 min-w-[180px] justify-center">
                   <Clock className="w-4 h-4 text-purple-400" />
-                  {selectedTopicHour && new Date(selectedTopicHour).toLocaleString('en-US', {
+                  {selectedTopicHour && formatLocalDateTime(selectedTopicHour, {
                     month: 'short',
                     day: 'numeric',
                     hour: 'numeric',
@@ -475,13 +504,13 @@ function App() {
                   <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                   <XAxis 
                     dataKey="hour" 
-                    tickFormatter={(v) => new Date(v).getHours() + ':00'}
+                    tickFormatter={(v) => formatLocalHour(v)}
                     stroke="#9ca3af"
                   />
                   <YAxis stroke="#9ca3af" />
                   <Tooltip 
                     contentStyle={{ backgroundColor: '#1f2937', border: 'none', borderRadius: '8px' }}
-                    labelFormatter={(v) => new Date(v).toLocaleString()}
+                    labelFormatter={(v) => formatLocalDateTime(v)}
                   />
                   <Line 
                     type="monotone" 
@@ -669,13 +698,13 @@ function App() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                 <XAxis 
                   dataKey="hour" 
-                  tickFormatter={(v) => new Date(v).getHours() + ':00'}
+                  tickFormatter={(v) => formatLocalHour(v)}
                   stroke="#9ca3af"
                 />
                 <YAxis stroke="#9ca3af" />
                 <Tooltip 
                   contentStyle={{ backgroundColor: '#1f2937', border: 'none', borderRadius: '8px' }}
-                  labelFormatter={(v) => new Date(v).toLocaleString()}
+                  labelFormatter={(v) => formatLocalDateTime(v)}
                 />
                 <Line 
                   type="monotone" 
@@ -708,13 +737,13 @@ function App() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                 <XAxis 
                   dataKey="hour" 
-                  tickFormatter={(v) => new Date(v).getHours() + ':00'}
+                  tickFormatter={(v) => formatLocalHour(v)}
                   stroke="#9ca3af"
                 />
                 <YAxis domain={[-1, 1]} stroke="#9ca3af" />
                 <Tooltip 
                   contentStyle={{ backgroundColor: '#1f2937', border: 'none', borderRadius: '8px' }}
-                  labelFormatter={(v) => new Date(v).toLocaleString()}
+                  labelFormatter={(v) => formatLocalDateTime(v)}
                 />
                 <Line 
                   type="monotone" 
@@ -756,7 +785,7 @@ function App() {
                 
                 <div className="px-3 py-1 bg-gray-800 rounded-lg text-sm flex items-center gap-2 min-w-[150px] justify-center">
                   <Calendar className="w-4 h-4 text-purple-400" />
-                  {latestSummary && new Date(latestSummary.date).toLocaleDateString('en-US', {
+                  {latestSummary && formatLocalDate(latestSummary.date, {
                     month: 'short',
                     day: 'numeric',
                     year: 'numeric'
@@ -783,7 +812,7 @@ function App() {
             <div className="space-y-6">
               <div className="text-sm text-gray-400 flex items-center gap-2">
                 <ChefHatIcon className="w-4 h-4" />
-                {new Date(latestSummary.date).toLocaleDateString('en-US', {
+                {formatLocalDate(latestSummary.date, {
                   weekday: 'long',
                   year: 'numeric',
                   month: 'long',
