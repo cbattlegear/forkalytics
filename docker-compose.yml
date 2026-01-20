@@ -8,8 +8,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-forkalytics}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    networks:
+      databases:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forkalytics}"]
       interval: 10s
@@ -19,10 +19,10 @@ services:
   redis:
     image: redis:7-alpine
     container_name: forkalytics-redis
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
+    networks:
+      databases:
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -35,11 +35,13 @@ services:
       dockerfile: Dockerfile
     container_name: forkalytics-api
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@postgres:5432/${POSTGRES_DB:-forkalytics}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@forkalytics-db:5432/${POSTGRES_DB:-forkalytics}
       REDIS_URL: redis://redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY}
     ports:
       - "8000:8000"
+    networks:
+      databases:
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,6 +69,8 @@ services:
     volumes:
       - ./shared:/app/shared:ro
     restart: unless-stopped
+    networks:
+      databases:
 
   scheduler:
     build:
@@ -90,6 +94,8 @@ services:
         condition: service_healthy
     volumes:
       - ./shared:/app/shared:ro
+    networks:
+      databases:
     restart: unless-stopped
 
   web:
@@ -101,9 +107,15 @@ services:
       - "3000:80"
     depends_on:
       - api
+    networks:
+      databases:
     environment:
       VITE_API_URL: http://localhost:8000
 
 volumes:
   postgres_data:
   redis_data:
+
+networks:
+  databases:
+    name: databases
