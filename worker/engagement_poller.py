@@ -16,8 +16,8 @@ from sqlalchemy import desc
 
 # Add shared module to path
 sys.path.insert(0, "/app")
-from shared.database import get_db_session, init_db
-from shared.models import MastodonPost
+from shared.database import get_db_session, init_db, get_default_instance_id
+from shared.models import MastodonPost, PostMetricSnapshot
 
 # Configure logging
 logging.basicConfig(
@@ -36,6 +36,16 @@ BATCH_SIZE = int(os.getenv("ENGAGEMENT_BATCH_SIZE", "50"))  # Posts per API batc
 MAX_POST_AGE_HOURS = int(os.getenv("ENGAGEMENT_MAX_AGE_HOURS", "48"))  # Only refresh posts newer than this
 REQUEST_DELAY_MS = int(os.getenv("ENGAGEMENT_REQUEST_DELAY_MS", "100"))  # Delay between API calls
 
+# Get instance ID (cached after first lookup)
+_instance_id_cache = None
+
+def get_instance_id() -> int:
+    """Get the instance ID for this worker"""
+    global _instance_id_cache
+    if _instance_id_cache is None:
+        _instance_id_cache = get_default_instance_id()
+    return _instance_id_cache
+
 # Graceful shutdown
 shutdown_event = asyncio.Event()
 
@@ -47,13 +57,16 @@ def calculate_engagement_score(reblogs: int, favourites: int, replies: int) -> f
 
 def get_posts_to_refresh() -> List[dict]:
     """Get posts that need engagement refresh from database"""
+    instance_id = get_instance_id()
     cutoff_time = datetime.now(timezone.utc) - timedelta(hours=MAX_POST_AGE_HOURS)
     
     with get_db_session() as db:
         posts = db.query(MastodonPost).filter(
+            MastodonPost.instance_id == instance_id,
             MastodonPost.created_at >= cutoff_time,
             MastodonPost.visibility == "public",  # Only public posts can be fetched
             MastodonPost.reblog_of_id == None,  # Skip reblogs, fetch originals
+            MastodonPost.deleted_at == None,  # Skip deleted posts
         ).order_by(
             desc(MastodonPost.engagement_score),  # Prioritize already-popular posts
             desc(MastodonPost.created_at)
@@ -117,10 +130,15 @@ async def fetch_status_from_api(client: httpx.AsyncClient, status_id: str) -> tu
 
 
 def update_post_metrics(post_id: str, new_metrics: dict) -> bool:
-    """Update post engagement metrics in database"""
+    """Update post engagement metrics in database and create snapshot"""
+    instance_id = get_instance_id()
+    
     try:
         with get_db_session() as db:
-            post = db.query(MastodonPost).filter(MastodonPost.id == post_id).first()
+            post = db.query(MastodonPost).filter(
+                MastodonPost.id == post_id,
+                MastodonPost.instance_id == instance_id
+            ).first()
             
             if not post:
                 return False
@@ -140,6 +158,18 @@ def update_post_metrics(post_id: str, new_metrics: dict) -> bool:
                 post.edited_at = datetime.fromisoformat(
                     new_metrics["edited_at"].replace("Z", "+00:00")
                 )
+            
+            # Create metric snapshot for time-series tracking
+            snapshot = PostMetricSnapshot(
+                instance_id=instance_id,
+                post_id=post_id,
+                captured_at=datetime.now(timezone.utc),
+                replies_count=new_metrics["replies_count"],
+                reblogs_count=new_metrics["reblogs_count"],
+                favourites_count=new_metrics["favourites_count"],
+                engagement_score=post.engagement_score
+            )
+            db.add(snapshot)
             
             return True
             

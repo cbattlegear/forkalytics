@@ -18,8 +18,11 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # Add shared module to path
 sys.path.insert(0, "/app")
-from shared.database import get_db_session, init_db
-from shared.models import MastodonPost, PostSentiment, DailySummary, HourlyStat, HourlyTopic
+from shared.database import get_db_session, init_db, get_default_instance_id
+from shared.models import (
+    MastodonPost, PostSentiment, DailySummary, HourlyStat, HourlyTopic,
+    Hashtag, PostHashtag, HashtagHourlyStat
+)
 
 # Configure logging
 logging.basicConfig(
@@ -34,6 +37,16 @@ vader_analyzer = SentimentIntensityAnalyzer()
 # Configuration - treat empty strings as None
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or None
 SENTIMENT_BATCH_SIZE = 100  # Can process more since VADER is fast
+
+# Get instance ID (cached after first lookup)
+_instance_id_cache = None
+
+def get_instance_id() -> int:
+    """Get the instance ID for this worker"""
+    global _instance_id_cache
+    if _instance_id_cache is None:
+        _instance_id_cache = get_default_instance_id()
+    return _instance_id_cache
 
 # Azure OpenAI Configuration - treat empty strings as None
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT") or None
@@ -80,13 +93,16 @@ else:
 
 def analyze_sentiment_batch():
     """Analyze sentiment for unprocessed posts using VADER (local, no API needed)"""
+    instance_id = get_instance_id()
     
     with get_db_session() as db:
         # Get posts that haven't been analyzed
         posts = db.query(MastodonPost).filter(
+            MastodonPost.instance_id == instance_id,
             MastodonPost.sentiment_analyzed == False,
             MastodonPost.content_text != None,
-            MastodonPost.content_text != ""
+            MastodonPost.content_text != "",
+            MastodonPost.deleted_at == None  # Skip deleted posts
         ).limit(SENTIMENT_BATCH_SIZE).all()
         
         if not posts:
@@ -115,13 +131,22 @@ def analyze_sentiment_batch():
                 else:
                     label = "neutral"
                 
-                # Create sentiment record
+                # Calculate hash of input for deduplication
+                import hashlib
+                input_hash = hashlib.sha256(post.content_text.encode()).hexdigest()
+                
+                # Create sentiment record with audit metadata
                 sentiment = PostSentiment(
+                    instance_id=instance_id,
                     post_id=post.id,
                     sentiment_score=compound,
                     sentiment_label=label,
                     topics=[],  # VADER doesn't extract topics
-                    model_version="vader-3.3.2"
+                    model="vader",
+                    model_version="vader-3.3.2",
+                    prompt_version="n/a",  # VADER doesn't use prompts
+                    input_hash=input_hash[:64],
+                    analyzed_at=datetime.utcnow()
                 )
                 db.add(sentiment)
                 
@@ -138,6 +163,8 @@ def analyze_sentiment_batch():
 
 def generate_hourly_stats(target_hour: datetime = None, force: bool = False):
     """Aggregate hourly statistics for a specific hour or the last complete hour"""
+    instance_id = get_instance_id()
+    
     with get_db_session() as db:
         # Determine which hour to process
         if target_hour:
@@ -150,7 +177,10 @@ def generate_hourly_stats(target_hour: datetime = None, force: bool = False):
         hour_end = hour_start + timedelta(hours=1)
         
         # Check if we already have stats for this hour
-        existing = db.query(HourlyStat).filter(HourlyStat.hour == hour_start).first()
+        existing = db.query(HourlyStat).filter(
+            HourlyStat.instance_id == instance_id,
+            HourlyStat.hour == hour_start
+        ).first()
         if existing:
             if force:
                 db.delete(existing)
@@ -160,7 +190,7 @@ def generate_hourly_stats(target_hour: datetime = None, force: bool = False):
                 logger.debug(f"Stats already exist for {hour_start}")
                 return
         
-        # Aggregate posts from the hour
+        # Aggregate posts from the hour (excluding deleted posts)
         stats = db.query(
             func.count(MastodonPost.id).label("post_count"),
             func.sum(MastodonPost.reblogs_count).label("reblog_count"),
@@ -168,29 +198,42 @@ def generate_hourly_stats(target_hour: datetime = None, force: bool = False):
             func.sum(MastodonPost.engagement_score).label("total_engagement"),
             func.avg(MastodonPost.engagement_score).label("avg_engagement")
         ).filter(
+            MastodonPost.instance_id == instance_id,
             MastodonPost.created_at >= hour_start,
-            MastodonPost.created_at < hour_end
+            MastodonPost.created_at < hour_end,
+            MastodonPost.deleted_at == None
         ).first()
         
         # Get average sentiment
         sentiment_avg = db.query(
             func.avg(PostSentiment.sentiment_score)
-        ).join(MastodonPost).filter(
+        ).join(
+            MastodonPost,
+            (PostSentiment.post_id == MastodonPost.id) & 
+            (PostSentiment.instance_id == MastodonPost.instance_id)
+        ).filter(
+            MastodonPost.instance_id == instance_id,
             MastodonPost.created_at >= hour_start,
-            MastodonPost.created_at < hour_end
+            MastodonPost.created_at < hour_end,
+            MastodonPost.deleted_at == None
         ).scalar()
         
-        # Get top hashtag (requires unnesting JSON array - simplified approach)
-        # For PostgreSQL, this would use json_array_elements
+        # Get top hashtag
+        # This is a simplified approach - for better performance, use post_hashtags table
+        top_hashtag = None
         
         hourly_stat = HourlyStat(
+            instance_id=instance_id,
             hour=hour_start,
             post_count=stats.post_count or 0,
             reblog_count=int(stats.reblog_count or 0),
             reply_count=int(stats.reply_count or 0),
             total_engagement=int(stats.total_engagement or 0),
             avg_engagement=float(stats.avg_engagement or 0),
-            avg_sentiment=sentiment_avg
+            avg_sentiment=sentiment_avg,
+            top_hashtag=top_hashtag,
+            definition_version="v1.0",
+            computed_at=datetime.utcnow()
         )
         if(stats.post_count > 0):
             db.add(hourly_stat)
@@ -221,6 +264,8 @@ def extract_hourly_topics(target_hour: datetime = None, force: bool = False):
         logger.warning("OpenAI API key not configured, skipping topic extraction")
         return
     
+    instance_id = get_instance_id()
+    
     with get_db_session() as db:
         # Determine which hour to process
         if target_hour:
@@ -233,10 +278,16 @@ def extract_hourly_topics(target_hour: datetime = None, force: bool = False):
         hour_end = hour_start + timedelta(hours=1)
         
         # Check if we already have topics for this hour
-        existing = db.query(HourlyTopic).filter(HourlyTopic.hour_start == hour_start).first()
+        existing = db.query(HourlyTopic).filter(
+            HourlyTopic.instance_id == instance_id,
+            HourlyTopic.hour_start == hour_start
+        ).first()
         if existing:
             if force:
-                db.query(HourlyTopic).filter(HourlyTopic.hour_start == hour_start).delete()
+                db.query(HourlyTopic).filter(
+                    HourlyTopic.instance_id == instance_id,
+                    HourlyTopic.hour_start == hour_start
+                ).delete()
                 # Committing delete so insert actually succeeds
                 db.commit()
                 logger.info(f"Deleted existing topics for {hour_start} (force mode)")
@@ -244,12 +295,14 @@ def extract_hourly_topics(target_hour: datetime = None, force: bool = False):
                 logger.debug(f"Topics already exist for {hour_start}")
                 return
         
-        # Get posts from the hour, ordered by engagement
+        # Get posts from the hour, ordered by engagement (excluding deleted posts)
         posts = db.query(MastodonPost).filter(
+            MastodonPost.instance_id == instance_id,
             MastodonPost.created_at >= hour_start,
             MastodonPost.created_at < hour_end,
             MastodonPost.content_text != None,
-            MastodonPost.content_text != ""
+            MastodonPost.content_text != "",
+            MastodonPost.deleted_at == None
         ).order_by(desc(MastodonPost.engagement_score)).limit(200).all()
         
         if len(posts) < 10:
@@ -301,6 +354,7 @@ def extract_hourly_topics(target_hour: datetime = None, force: bool = False):
             topics_added = 0
             for topic_data in data.get("topics", []):
                 topic = HourlyTopic(
+                    instance_id=instance_id,
                     hour_start=hour_start,
                     topic=topic_data.get("topic", "Unknown"),
                     summary=topic_data.get("summary"),
@@ -325,6 +379,8 @@ def generate_daily_summary(target_date: datetime = None, force: bool = False):
         logger.warning("OpenAI API key not configured, skipping daily summary")
         return
     
+    instance_id = get_instance_id()
+    
     with get_db_session() as db:
         # Determine which day to process
         if target_date:
@@ -336,7 +392,10 @@ def generate_daily_summary(target_date: datetime = None, force: bool = False):
         day_end = day_start + timedelta(days=1)
         
         # Check if summary already exists
-        existing = db.query(DailySummary).filter(DailySummary.date == day_start).first()
+        existing = db.query(DailySummary).filter(
+            DailySummary.instance_id == instance_id,
+            DailySummary.date == day_start
+        ).first()
         if existing:
             if force:
                 db.delete(existing)
@@ -347,14 +406,16 @@ def generate_daily_summary(target_date: datetime = None, force: bool = False):
                 logger.info(f"Daily summary already exists for {day_start.date()}")
                 return
         
-        # Gather statistics
+        # Gather statistics (excluding deleted posts)
         post_stats = db.query(
             func.count(MastodonPost.id).label("total_posts"),
             func.sum(MastodonPost.engagement_score).label("total_engagement"),
             func.count(func.distinct(MastodonPost.account_id)).label("unique_authors")
         ).filter(
+            MastodonPost.instance_id == instance_id,
             MastodonPost.created_at >= day_start,
-            MastodonPost.created_at < day_end
+            MastodonPost.created_at < day_end,
+            MastodonPost.deleted_at == None
         ).first()
         
         # Sentiment breakdown
@@ -363,16 +424,39 @@ def generate_daily_summary(target_date: datetime = None, force: bool = False):
             func.count().filter(PostSentiment.sentiment_label == "positive").label("positive_count"),
             func.count().filter(PostSentiment.sentiment_label == "negative").label("negative_count"),
             func.count().filter(PostSentiment.sentiment_label == "neutral").label("neutral_count")
-        ).join(MastodonPost).filter(
+        ).join(
+            MastodonPost,
+            (PostSentiment.post_id == MastodonPost.id) & 
+            (PostSentiment.instance_id == MastodonPost.instance_id)
+        ).filter(
+            MastodonPost.instance_id == instance_id,
             MastodonPost.created_at >= day_start,
-            MastodonPost.created_at < day_end
+            MastodonPost.created_at < day_end,
+            MastodonPost.deleted_at == None
         ).first()
         
         # Get top posts for context
         top_posts = db.query(MastodonPost).filter(
+            MastodonPost.instance_id == instance_id,
             MastodonPost.created_at >= day_start,
-            MastodonPost.created_at < day_end
+            MastodonPost.created_at < day_end,
+            MastodonPost.deleted_at == None
         ).order_by(desc(MastodonPost.engagement_score)).limit(20).all()
+        
+        # Prepare input stats for audit
+        input_stats = {
+            "total_posts": post_stats.total_posts or 0,
+            "total_engagement": int(post_stats.total_engagement or 0),
+            "unique_authors": post_stats.unique_authors or 0,
+            "avg_sentiment": float(sentiment_stats.avg_sentiment) if sentiment_stats.avg_sentiment else None,
+            "positive_count": sentiment_stats.positive_count or 0,
+            "negative_count": sentiment_stats.negative_count or 0,
+            "neutral_count": sentiment_stats.neutral_count or 0
+        }
+        
+        # Calculate hash of input
+        import hashlib
+        input_hash = hashlib.sha256(json.dumps(input_stats, sort_keys=True).encode()).hexdigest()
         
         # Prepare content for AI summary
         posts_context = "\n".join([
@@ -427,7 +511,10 @@ def generate_daily_summary(target_date: datetime = None, force: bool = False):
             ai_result = json.loads(result_text)
             
             summary = DailySummary(
+                instance_id=instance_id,
                 date=day_start,
+                window_start=day_start,
+                window_end=day_end,
                 total_posts=post_stats.total_posts or 0,
                 total_engagement=int(post_stats.total_engagement or 0),
                 unique_authors=post_stats.unique_authors or 0,
@@ -437,7 +524,12 @@ def generate_daily_summary(target_date: datetime = None, force: bool = False):
                 neutral_count=sentiment_stats.neutral_count or 0,
                 summary_text=ai_result.get("summary_text", ""),
                 trending_topics=ai_result.get("trending_topics", []),
-                notable_events=ai_result.get("notable_events", [])
+                notable_events=ai_result.get("notable_events", []),
+                model=OPENAI_MODEL,
+                prompt_version="v1.0",
+                input_stats_json=input_stats,
+                input_hash=input_hash[:64],
+                generated_at=datetime.utcnow()
             )
             
             db.add(summary)
