@@ -176,11 +176,22 @@ npm run dev
 ### Database Schema
 
 See `shared/models.py` for SQLAlchemy models:
-- `MastodonAccount` - User accounts
-- `MastodonPost` - Posts/statuses
-- `PostSentiment` - Sentiment analysis results
-- `DailySummary` - AI daily summaries
-- `HourlyStat` - Aggregated hourly stats
+- `Instance` - Mastodon instance tracking (multi-instance support)
+- `MastodonAccount` - User accounts (with instance_id)
+- `MastodonPost` - Posts/statuses (with instance_id, soft deletes, edit tracking)
+- `PostMetricSnapshot` - Time-series engagement metrics
+- `PostVersion` - Edit history for posts
+- `Hashtag` - Normalized hashtag dimension
+- `PostHashtag` - Post-to-hashtag associations
+- `PostMention` - Post-to-account mention associations
+- `HashtagHourlyStat` - Aggregated hashtag statistics for trending analysis
+- `PostSentiment` - Sentiment analysis results (with audit metadata)
+- `DailySummary` - AI daily summaries (with audit metadata)
+- `HourlyStat` - Aggregated hourly stats (recomputable)
+- `HourlyTopic` - AI-extracted trending topics
+- `StreamEvent` - Raw streaming events log (for replay/debugging)
+
+**📚 For detailed information about the data model, see [DATA_MODELING.md](DATA_MODELING.md)**
 
 ## Monitoring Multiple Instances
 
@@ -188,6 +199,34 @@ To monitor multiple Mastodon instances, you can:
 
 1. Run multiple worker containers with different `MASTODON_INSTANCE` and `MASTODON_ACCESS_TOKEN` values
 2. Use `public:remote` stream type from a large instance to see federated content
+3. Each instance is tracked separately with a unique `instance_id` in the database
+
+## Upgrading from Previous Versions
+
+The database schema has been significantly enhanced to support better analytics. See [DATA_MODELING.md](DATA_MODELING.md) for details.
+
+### For New Installations
+No special steps needed - just follow the Quick Start guide above.
+
+### For Existing Installations
+
+**Option 1: Fresh Start (Recommended for Development)**
+```bash
+docker compose down
+docker volume rm forkalytics_postgres_data
+docker compose up -d
+```
+
+**Option 2: Preserve Data (Production)**
+```bash
+# Backup first!
+docker exec forkalytics-db pg_dump -U forkalytics forkalytics > backup.sql
+
+# Run migration helper
+docker exec forkalytics-worker python /app/shared/migration_helper.py
+```
+
+**Note**: The new schema uses composite primary keys. For production migrations with significant data, please review [DATA_MODELING.md](DATA_MODELING.md) for detailed migration steps.
 
 ## Troubleshooting
 
