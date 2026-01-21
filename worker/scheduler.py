@@ -154,6 +154,7 @@ def generate_hourly_stats(target_hour: datetime = None, force: bool = False):
         if existing:
             if force:
                 db.delete(existing)
+                db.commit()
                 logger.info(f"Deleted existing stats for {hour_start} (force mode)")
             else:
                 logger.debug(f"Stats already exist for {hour_start}")
@@ -191,9 +192,27 @@ def generate_hourly_stats(target_hour: datetime = None, force: bool = False):
             avg_engagement=float(stats.avg_engagement or 0),
             avg_sentiment=sentiment_avg
         )
-        
-        db.add(hourly_stat)
-        logger.info(f"Generated hourly stats for {hour_start}: {stats.post_count} posts")
+        if(stats.post_count > 0):
+            db.add(hourly_stat)
+            logger.info(f"Generated hourly stats for {hour_start}: {stats.post_count} posts")
+        else:
+            logger.info(f"No posts to generate hourly stats for {hour_start}")
+
+
+def generate_hourly_stats_rolling(hours: int = 48):
+    """Regenerate hourly statistics for the last N hours to capture updated engagement metrics"""
+    logger.info(f"Regenerating hourly stats for the last {hours} hours")
+    
+    now = datetime.utcnow()
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+    
+    updated_count = 0
+    for i in range(1, hours + 1):  # Start from 1 to skip current incomplete hour
+        target_hour = current_hour - timedelta(hours=i)
+        generate_hourly_stats(target_hour=target_hour, force=True)
+        updated_count += 1
+    
+    logger.info(f"Completed regenerating {updated_count} hours of stats")
 
 
 def extract_hourly_topics(target_hour: datetime = None, force: bool = False):
@@ -218,6 +237,8 @@ def extract_hourly_topics(target_hour: datetime = None, force: bool = False):
         if existing:
             if force:
                 db.query(HourlyTopic).filter(HourlyTopic.hour_start == hour_start).delete()
+                # Committing delete so insert actually succeeds
+                db.commit()
                 logger.info(f"Deleted existing topics for {hour_start} (force mode)")
             else:
                 logger.debug(f"Topics already exist for {hour_start}")
@@ -319,6 +340,8 @@ def generate_daily_summary(target_date: datetime = None, force: bool = False):
         if existing:
             if force:
                 db.delete(existing)
+                # Committing delete so insert actually succeeds
+                db.commit()
                 logger.info(f"Deleted existing summary for {day_start.date()} (force mode)")
             else:
                 logger.info(f"Daily summary already exists for {day_start.date()}")
@@ -442,12 +465,12 @@ def main():
         name="Analyze sentiment for new posts"
     )
     
-    # Hourly stats at the top of every hour
+    # Hourly stats at the top of every hour - reprocess last 48 hours to capture engagement updates
     scheduler.add_job(
-        generate_hourly_stats,
+        generate_hourly_stats_rolling,
         CronTrigger(minute=5),  # 5 minutes past every hour
         id="hourly_stats",
-        name="Generate hourly statistics"
+        name="Regenerate hourly statistics (last 48h)"
     )
     
     # Hourly topic extraction at 10 minutes past every hour

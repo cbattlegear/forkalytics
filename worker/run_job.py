@@ -7,19 +7,23 @@ from scheduler import (
     analyze_sentiment_batch,
     extract_hourly_topics,
     generate_daily_summary,
-    generate_hourly_stats
+    generate_hourly_stats,
+    generate_hourly_stats_rolling
 )
 from backfill import (
     backfill_public_timeline,
     backfill_hashtag,
     backfill_trending
 )
+from engagement_poller import refresh_single_batch
 
 JOBS = {
     "sentiment": analyze_sentiment_batch,
     "topics": extract_hourly_topics,
     "summary": generate_daily_summary,
     "stats": generate_hourly_stats,
+    "stats-rolling": generate_hourly_stats_rolling,
+    "engagement": None,  # Special case - uses async
     "backfill": None,  # Special case - uses async
     "reprocess": None,  # Special case - date range processing
     "all": None  # Special case
@@ -35,6 +39,12 @@ def run_all():
     print("Running daily summary...")
     generate_daily_summary()
     print("All jobs complete!")
+
+def run_engagement():
+    """Run a single engagement refresh batch."""
+    result = asyncio.run(refresh_single_batch())
+    print(f"Fetched: {result['fetched']}, Changed: {result['changed']}")
+
 
 def run_backfill():
     """Run backfill job with optional arguments."""
@@ -174,10 +184,12 @@ def main():
         print("Usage: python run_job.py <job> [options]")
         print(f"Available jobs: {', '.join(JOBS.keys())}")
         print()
-        print("  sentiment  - Analyze sentiment of unprocessed posts")
-        print("  topics     - Extract trending topics from recent posts")
-        print("  summary    - Generate daily summary (uses OpenAI)")
-        print("  stats      - Generate hourly statistics")
+        print("  sentiment     - Analyze sentiment of unprocessed posts")
+        print("  topics        - Extract trending topics from recent posts")
+        print("  summary       - Generate daily summary (uses OpenAI)")
+        print("  stats         - Generate hourly statistics (last hour only)")
+        print("  stats-rolling - Regenerate hourly stats for last 48 hours")
+        print("  engagement    - Refresh engagement metrics from Mastodon API")
         print("  backfill   - Backfill historical posts from Mastodon")
         print("               Options: -n <max_posts> -m <mode> -t <hashtag>")
         print("               Modes: public, hashtag, trending")
@@ -200,6 +212,10 @@ def main():
         print("Done!")
     elif job_name == "reprocess":
         run_reprocess()
+    elif job_name == "engagement":
+        print("Running engagement refresh...")
+        run_engagement()
+        print("Done!")
     else:
         print(f"Running {job_name}...")
         JOBS[job_name]()

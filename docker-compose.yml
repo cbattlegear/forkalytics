@@ -103,6 +103,29 @@ services:
       databases:
     restart: unless-stopped
 
+  engagement-poller:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: forkalytics-engagement-poller
+    command: python engagement_poller.py
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-forkalytics}:${POSTGRES_PASSWORD:-forkalytics_secret}@postgres:5432/${POSTGRES_DB:-forkalytics}
+      MASTODON_INSTANCE: ${MASTODON_INSTANCE:-https://mastodon.social}
+      MASTODON_ACCESS_TOKEN: ${MASTODON_ACCESS_TOKEN:-}
+      ENGAGEMENT_POLL_INTERVAL: ${ENGAGEMENT_POLL_INTERVAL:-300}
+      ENGAGEMENT_BATCH_SIZE: ${ENGAGEMENT_BATCH_SIZE:-50}
+      ENGAGEMENT_MAX_AGE_HOURS: ${ENGAGEMENT_MAX_AGE_HOURS:-48}
+      ENGAGEMENT_REQUEST_DELAY_MS: ${ENGAGEMENT_REQUEST_DELAY_MS:-100}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+    networks:
+      databases:
+    restart: unless-stopped
+
   web:
     build:
       context: ./web
