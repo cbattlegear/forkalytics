@@ -6,6 +6,7 @@ import os
 import sys
 import json
 import httpx
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 
@@ -15,13 +16,30 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 from pydantic import BaseModel
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Add shared module to path
 sys.path.insert(0, "/app")
-from shared.database import get_db, init_db
-from shared.models import MastodonPost, MastodonAccount, PostSentiment, DailySummary, HourlyStat, HourlyTopic
+from shared.database import get_db, init_db, get_default_instance_id
+from shared.models import (
+    MastodonPost, MastodonAccount, PostSentiment, DailySummary, HourlyStat, HourlyTopic,
+    Hashtag, PostHashtag, PostMetricSnapshot
+)
 
 # Configuration
 MASTODON_INSTANCE = os.getenv("MASTODON_INSTANCE", "https://mastodon.social")
+
+# Get instance ID (cached after first lookup)
+_instance_id_cache = None
+
+def get_instance_id() -> int:
+    """Get the instance ID for this API"""
+    global _instance_id_cache
+    if _instance_id_cache is None:
+        _instance_id_cache = get_default_instance_id()
+    return _instance_id_cache
 
 # Initialize FastAPI
 app = FastAPI(
@@ -160,22 +178,36 @@ async def health_check():
 @app.get("/api/stats", response_model=StatsOverview)
 async def get_stats(db: Session = Depends(get_db)):
     """Get overview statistics"""
+    instance_id = get_instance_id()
     now = datetime.utcnow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     hour_start = now.replace(minute=0, second=0, microsecond=0)
     
-    total_posts = db.query(func.count(MastodonPost.id)).scalar()
-    total_accounts = db.query(func.count(MastodonAccount.id)).scalar()
+    total_posts = db.query(func.count(MastodonPost.id)).filter(
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.deleted_at == None
+    ).scalar()
+    
+    total_accounts = db.query(func.count(MastodonAccount.id)).filter(
+        MastodonAccount.instance_id == instance_id
+    ).scalar()
     
     posts_today = db.query(func.count(MastodonPost.id)).filter(
-        MastodonPost.created_at >= today_start
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.created_at >= today_start,
+        MastodonPost.deleted_at == None
     ).scalar()
     
     posts_this_hour = db.query(func.count(MastodonPost.id)).filter(
-        MastodonPost.created_at >= hour_start
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.created_at >= hour_start,
+        MastodonPost.deleted_at == None
     ).scalar()
     
-    avg_engagement = db.query(func.avg(MastodonPost.engagement_score)).scalar() or 0
+    avg_engagement = db.query(func.avg(MastodonPost.engagement_score)).filter(
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.deleted_at == None
+    ).scalar() or 0
     
     # Sentiment stats
     sentiment_query = db.query(
@@ -184,6 +216,8 @@ async def get_stats(db: Session = Depends(get_db)):
         func.count().filter(PostSentiment.sentiment_label == "negative").label("negative"),
         func.count().filter(PostSentiment.sentiment_label == "neutral").label("neutral"),
         func.count().label("total")
+    ).filter(
+        PostSentiment.instance_id == instance_id
     ).first()
     
     return StatsOverview(
@@ -206,32 +240,45 @@ async def get_stats(db: Session = Depends(get_db)):
 @app.get("/api/stats/overview", response_model=OverviewStats)
 async def get_overview_stats(db: Session = Depends(get_db)):
     """Get overview statistics including user counts"""
+    instance_id = get_instance_id()
     now = datetime.now(timezone.utc)
     last_48_hours = now - timedelta(hours=48)
     
     # Total users (accounts we've seen)
-    total_users = db.query(func.count(MastodonAccount.id)).scalar() or 0
+    total_users = db.query(func.count(MastodonAccount.id)).filter(
+        MastodonAccount.instance_id == instance_id
+    ).scalar() or 0
     
     # Active users (posted in last 48 hours)
     active_users = db.query(func.count(func.distinct(MastodonPost.account_id))).filter(
-        MastodonPost.created_at >= last_48_hours
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.created_at >= last_48_hours,
+        MastodonPost.deleted_at == None
     ).scalar() or 0
     
-    # Total posts
-    total_posts = db.query(func.count(MastodonPost.id)).scalar() or 0
+    # Total posts (not deleted)
+    total_posts = db.query(func.count(MastodonPost.id)).filter(
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.deleted_at == None
+    ).scalar() or 0
     
     # Posts in last 48 hours
     recent_posts = db.query(func.count(MastodonPost.id)).filter(
-        MastodonPost.created_at >= last_48_hours
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.created_at >= last_48_hours,
+        MastodonPost.deleted_at == None
     ).scalar() or 0
     
     # Average engagement score (last 48 hours)
     avg_engagement = db.query(func.avg(MastodonPost.engagement_score)).filter(
-        MastodonPost.created_at >= last_48_hours
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.created_at >= last_48_hours,
+        MastodonPost.deleted_at == None
     ).scalar() or 0
     
     # Bot vs human breakdown
     bot_count = db.query(func.count(MastodonAccount.id)).filter(
+        MastodonAccount.instance_id == instance_id,
         MastodonAccount.bot == True
     ).scalar() or 0
     
@@ -289,10 +336,13 @@ async def get_popular_posts(
     db: Session = Depends(get_db)
 ):
     """Get most popular posts by engagement score"""
+    instance_id = get_instance_id()
     since = datetime.utcnow() - timedelta(hours=hours)
     
     query = db.query(MastodonPost).filter(
-        MastodonPost.created_at >= since
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.created_at >= since,
+        MastodonPost.deleted_at == None
     )
     
     if language:
@@ -304,6 +354,7 @@ async def get_popular_posts(
     result = []
     for post in posts:
         sentiment = db.query(PostSentiment).filter(
+            PostSentiment.instance_id == instance_id,
             PostSentiment.post_id == post.id
         ).first()
         
@@ -344,7 +395,11 @@ async def get_recent_posts(
     db: Session = Depends(get_db)
 ):
     """Get most recent posts"""
-    query = db.query(MastodonPost)
+    instance_id = get_instance_id()
+    query = db.query(MastodonPost).filter(
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.deleted_at == None
+    )
     
     if language:
         query = query.filter(MastodonPost.language == language)
@@ -354,6 +409,7 @@ async def get_recent_posts(
     result = []
     for post in posts:
         sentiment = db.query(PostSentiment).filter(
+            PostSentiment.instance_id == instance_id,
             PostSentiment.post_id == post.id
         ).first()
         
@@ -393,9 +449,11 @@ async def get_hourly_stats(
     db: Session = Depends(get_db)
 ):
     """Get hourly statistics"""
+    instance_id = get_instance_id()
     since = datetime.utcnow() - timedelta(hours=hours)
     
     stats = db.query(HourlyStat).filter(
+        HourlyStat.instance_id == instance_id,
         HourlyStat.hour >= since
     ).order_by(HourlyStat.hour).all()
     
@@ -409,9 +467,11 @@ async def get_daily_summaries(
     db: Session = Depends(get_db)
 ):
     """Get daily AI-generated summaries"""
+    instance_id = get_instance_id()
     since = datetime.utcnow() - timedelta(days=days)
     
     summaries = db.query(DailySummary).filter(
+        DailySummary.instance_id == instance_id,
         DailySummary.date >= since
     ).order_by(desc(DailySummary.date)).all()
     
@@ -422,7 +482,10 @@ async def get_daily_summaries(
 @app.get("/api/summaries/latest", response_model=Optional[DailySummaryResponse])
 async def get_latest_summary(db: Session = Depends(get_db)):
     """Get the most recent daily summary"""
-    summary = db.query(DailySummary).order_by(desc(DailySummary.date)).first()
+    instance_id = get_instance_id()
+    summary = db.query(DailySummary).filter(
+        DailySummary.instance_id == instance_id
+    ).order_by(desc(DailySummary.date)).first()
     
     if not summary:
         raise HTTPException(status_code=404, detail="No summaries available yet")
@@ -437,13 +500,44 @@ async def get_trending_hashtags(
     limit: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db)
 ):
-    """Get trending hashtags"""
+    """Get trending hashtags using normalized hashtag tables"""
+    instance_id = get_instance_id()
     since = datetime.utcnow() - timedelta(hours=hours)
     
-    # Get posts with hashtags
+    # Try to use normalized hashtag tables first
+    try:
+        # Query using PostHashtag join
+        hashtag_counts = db.query(
+            Hashtag.name,
+            func.count(PostHashtag.post_id).label("count")
+        ).join(
+            PostHashtag, Hashtag.id == PostHashtag.hashtag_id
+        ).join(
+            MastodonPost,
+            (PostHashtag.post_id == MastodonPost.id) & 
+            (PostHashtag.instance_id == MastodonPost.instance_id)
+        ).filter(
+            Hashtag.instance_id == instance_id,
+            MastodonPost.instance_id == instance_id,
+            MastodonPost.created_at >= since,
+            MastodonPost.deleted_at == None
+        ).group_by(
+            Hashtag.name
+        ).order_by(
+            desc("count")
+        ).limit(limit).all()
+        
+        if hashtag_counts:
+            return [HashtagCount(hashtag=tag, count=count) for tag, count in hashtag_counts]
+    except Exception as e:
+        logger.warning(f"Could not use normalized hashtags, falling back to JSON: {e}")
+    
+    # Fallback to JSON-based approach for backward compatibility
     posts = db.query(MastodonPost.hashtags).filter(
+        MastodonPost.instance_id == instance_id,
         MastodonPost.created_at >= since,
-        MastodonPost.hashtags != None
+        MastodonPost.hashtags != None,
+        MastodonPost.deleted_at == None
     ).all()
     
     # Count hashtags
@@ -467,6 +561,7 @@ async def get_sentiment_distribution(
     db: Session = Depends(get_db)
 ):
     """Get sentiment distribution over time"""
+    instance_id = get_instance_id()
     since = datetime.utcnow() - timedelta(hours=hours)
     
     # Get hourly sentiment averages
@@ -474,8 +569,14 @@ async def get_sentiment_distribution(
         func.date_trunc('hour', MastodonPost.created_at).label('hour'),
         func.avg(PostSentiment.sentiment_score).label('avg_sentiment'),
         func.count().label('count')
-    ).join(PostSentiment).filter(
-        MastodonPost.created_at >= since
+    ).join(
+        PostSentiment,
+        (PostSentiment.post_id == MastodonPost.id) & 
+        (PostSentiment.instance_id == MastodonPost.instance_id)
+    ).filter(
+        MastodonPost.instance_id == instance_id,
+        MastodonPost.created_at >= since,
+        MastodonPost.deleted_at == None
     ).group_by(
         func.date_trunc('hour', MastodonPost.created_at)
     ).order_by('hour').all()
@@ -497,9 +598,11 @@ async def get_hourly_topics(
     db: Session = Depends(get_db)
 ):
     """Get AI-extracted trending topics for the last N hours"""
+    instance_id = get_instance_id()
     since = datetime.utcnow() - timedelta(hours=hours)
     
     topics = db.query(HourlyTopic).filter(
+        HourlyTopic.instance_id == instance_id,
         HourlyTopic.hour_start >= since
     ).order_by(desc(HourlyTopic.hour_start), desc(HourlyTopic.post_count)).all()
     
@@ -523,8 +626,12 @@ async def get_hourly_topics(
 @app.get("/api/topics/current")
 async def get_current_topics(db: Session = Depends(get_db)):
     """Get topics from the most recent hour"""
+    instance_id = get_instance_id()
+    
     # Get the most recent hour that has topics
-    latest = db.query(HourlyTopic).order_by(desc(HourlyTopic.hour_start)).first()
+    latest = db.query(HourlyTopic).filter(
+        HourlyTopic.instance_id == instance_id
+    ).order_by(desc(HourlyTopic.hour_start)).first()
     
     if not latest:
         return {"topics": [], "hour": None}
@@ -533,6 +640,7 @@ async def get_current_topics(db: Session = Depends(get_db)):
     
     # Get all topics for that hour
     topics = db.query(HourlyTopic).filter(
+        HourlyTopic.instance_id == instance_id,
         HourlyTopic.hour_start == current_hour
     ).order_by(desc(HourlyTopic.post_count)).all()
     
