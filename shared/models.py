@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 from sqlalchemy import (
     Column, String, Integer, BigInteger, Text, DateTime, 
-    Boolean, Float, ForeignKey, Index, JSON, UniqueConstraint
+    Boolean, Float, ForeignKey, ForeignKeyConstraint, Index, JSON, UniqueConstraint
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -120,15 +120,17 @@ class MastodonPost(Base):
     # Relationships
     instance = relationship("Instance", back_populates="posts")
     account = relationship("MastodonAccount", back_populates="posts", 
-                         foreign_keys=[account_id, account_instance_id])
+                         foreign_keys="[MastodonPost.account_id, MastodonPost.account_instance_id]")
     metric_snapshots = relationship("PostMetricSnapshot", back_populates="post")
     versions = relationship("PostVersion", back_populates="post", order_by="PostVersion.version_seq")
     hashtag_associations = relationship("PostHashtag", back_populates="post")
     mention_associations = relationship("PostMention", back_populates="post")
 
     __table_args__ = (
-        ForeignKey(['account_id', 'account_instance_id'], 
-                  ['mastodon_accounts.id', 'mastodon_accounts.instance_id']),
+        ForeignKeyConstraint(
+            ['account_id', 'account_instance_id'], 
+            ['mastodon_accounts.id', 'mastodon_accounts.instance_id']
+        ),
         Index("ix_posts_instance_created", "instance_id", "created_at"),
         Index("ix_posts_engagement", "engagement_score"),
         Index("ix_posts_language", "language"),
@@ -158,11 +160,13 @@ class PostMetricSnapshot(Base):
     
     # Relationships
     post = relationship("MastodonPost", back_populates="metric_snapshots",
-                       foreign_keys=[post_id, instance_id])
+                       foreign_keys="[PostMetricSnapshot.post_id, PostMetricSnapshot.instance_id]")
 
     __table_args__ = (
-        ForeignKey(['post_id', 'instance_id'], 
-                  ['mastodon_posts.id', 'mastodon_posts.instance_id']),
+        ForeignKeyConstraint(
+            ['post_id', 'instance_id'], 
+            ['mastodon_posts.id', 'mastodon_posts.instance_id']
+        ),
         Index("ix_snapshots_instance_captured", "instance_id", "captured_at"),
         Index("ix_snapshots_post_captured", "instance_id", "post_id", "captured_at"),
     )
@@ -193,11 +197,13 @@ class PostVersion(Base):
     
     # Relationships
     post = relationship("MastodonPost", back_populates="versions",
-                       foreign_keys=[post_id, instance_id])
+                       foreign_keys="[PostVersion.post_id, PostVersion.instance_id]")
 
     __table_args__ = (
-        ForeignKey(['post_id', 'instance_id'], 
-                  ['mastodon_posts.id', 'mastodon_posts.instance_id']),
+        ForeignKeyConstraint(
+            ['post_id', 'instance_id'], 
+            ['mastodon_posts.id', 'mastodon_posts.instance_id']
+        ),
         Index("ix_versions_post", "instance_id", "post_id", "version_seq"),
         UniqueConstraint("instance_id", "post_id", "version_seq", 
                         name="uq_versions_post_seq"),
@@ -237,12 +243,14 @@ class PostHashtag(Base):
     
     # Relationships
     post = relationship("MastodonPost", back_populates="hashtag_associations",
-                       foreign_keys=[post_id, instance_id])
+                       foreign_keys="[PostHashtag.post_id, PostHashtag.instance_id]")
     hashtag = relationship("Hashtag", back_populates="post_associations")
 
     __table_args__ = (
-        ForeignKey(['post_id', 'instance_id'], 
-                  ['mastodon_posts.id', 'mastodon_posts.instance_id']),
+        ForeignKeyConstraint(
+            ['post_id', 'instance_id'], 
+            ['mastodon_posts.id', 'mastodon_posts.instance_id']
+        ),
         UniqueConstraint("instance_id", "post_id", "hashtag_id", 
                         name="uq_post_hashtags_post_tag"),
         Index("ix_post_hashtags_hashtag", "instance_id", "hashtag_id", "post_id"),
@@ -266,13 +274,17 @@ class PostMention(Base):
     
     # Relationships
     post = relationship("MastodonPost", back_populates="mention_associations",
-                       foreign_keys=[post_id, instance_id])
+                       foreign_keys="[PostMention.post_id, PostMention.instance_id]")
 
     __table_args__ = (
-        ForeignKey(['post_id', 'instance_id'], 
-                  ['mastodon_posts.id', 'mastodon_posts.instance_id']),
-        ForeignKey(['mentioned_account_id', 'mentioned_account_instance_id'],
-                  ['mastodon_accounts.id', 'mastodon_accounts.instance_id']),
+        ForeignKeyConstraint(
+            ['post_id', 'instance_id'], 
+            ['mastodon_posts.id', 'mastodon_posts.instance_id']
+        ),
+        ForeignKeyConstraint(
+            ['mentioned_account_id', 'mentioned_account_instance_id'],
+            ['mastodon_accounts.id', 'mastodon_accounts.instance_id']
+        ),
         UniqueConstraint("instance_id", "post_id", "mentioned_account_id", 
                         name="uq_post_mentions_post_account"),
         Index("ix_post_mentions_mentioned", "mentioned_account_id", "mentioned_account_instance_id"),
@@ -363,8 +375,10 @@ class PostSentiment(Base):
     next_retry_at = Column(DateTime)
 
     __table_args__ = (
-        ForeignKey(['post_id', 'instance_id'], 
-                  ['mastodon_posts.id', 'mastodon_posts.instance_id']),
+        ForeignKeyConstraint(
+            ['post_id', 'instance_id'], 
+            ['mastodon_posts.id', 'mastodon_posts.instance_id']
+        ),
         UniqueConstraint("instance_id", "post_id", name="uq_sentiment_instance_post"),
         Index("ix_sentiment_score", "sentiment_score"),
         Index("ix_sentiment_label", "sentiment_label"),

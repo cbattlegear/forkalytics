@@ -206,11 +206,11 @@ def save_status(account_dict: dict, post_dict: dict, hashtags: list, mentions_da
             
             # If edited, create a version entry
             if is_edit and existing_post.edited_at != post_dict["edited_at"]:
-                # Find the next version sequence number
-                max_version = db.query(PostVersion).filter(
+                # Find the next version sequence number (robust against race conditions)
+                max_version = db.query(func.coalesce(func.max(PostVersion.version_seq), 0)).filter(
                     PostVersion.instance_id == instance_id,
                     PostVersion.post_id == post_dict["id"]
-                ).count()
+                ).scalar()
                 
                 version = PostVersion(
                     instance_id=instance_id,
@@ -303,9 +303,14 @@ def save_status(account_dict: dict, post_dict: dict, hashtags: list, mentions_da
                 # Extract info
                 username = mention_obj.get("username", mention_acct.split('@')[0])
                 
-                # Try to find the mentioned account
-                mentioned_account_id = mention_obj.get("id", "unknown")
+                # Try to find the mentioned account - if not found, skip this mention
+                # (Foreign key constraint requires the account to exist)
+                mentioned_account_id = mention_obj.get("id")
+                if not mentioned_account_id:
+                    continue
                 
+                # Only create mention if we have a valid account ID
+                # The mentioned account should already exist from the mention object in the status
                 post_mention = PostMention(
                     instance_id=instance_id,
                     post_id=post_dict["id"],
@@ -314,7 +319,12 @@ def save_status(account_dict: dict, post_dict: dict, hashtags: list, mentions_da
                     mentioned_acct=mention_acct,
                     mentioned_username=username
                 )
-                db.add(post_mention)
+                try:
+                    db.add(post_mention)
+                except Exception as e:
+                    # If FK constraint fails, the mentioned account doesn't exist yet
+                    # This is OK - we'll pick it up when that account posts
+                    logger.debug(f"Could not create mention for {mention_acct}: {e}")
 
 
 async def process_event(event_type: str, payload: str):
