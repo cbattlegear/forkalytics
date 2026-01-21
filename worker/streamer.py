@@ -17,8 +17,11 @@ from bs4 import BeautifulSoup
 
 # Add shared module to path
 sys.path.insert(0, "/app")
-from shared.database import get_db_session, init_db
-from shared.models import MastodonAccount, MastodonPost
+from shared.database import get_db_session, init_db, get_default_instance_id
+from shared.models import (
+    MastodonAccount, MastodonPost, PostMetricSnapshot, PostVersion,
+    Hashtag, PostHashtag, PostMention, StreamEvent
+)
 
 # Configure logging
 logging.basicConfig(
@@ -31,6 +34,16 @@ logger = logging.getLogger("mastodon_streamer")
 MASTODON_INSTANCE = os.getenv("MASTODON_INSTANCE", "https://mastodon.social")
 MASTODON_ACCESS_TOKEN = os.getenv("MASTODON_ACCESS_TOKEN")
 STREAM_TYPE = os.getenv("STREAM_TYPE", "public:local")  # public, public:local, public:remote
+
+# Get instance ID (cached after first lookup)
+_instance_id_cache = None
+
+def get_instance_id() -> int:
+    """Get the instance ID for this worker"""
+    global _instance_id_cache
+    if _instance_id_cache is None:
+        _instance_id_cache = get_default_instance_id()
+    return _instance_id_cache
 
 # Graceful shutdown
 shutdown_event = asyncio.Event()
@@ -60,17 +73,24 @@ def parse_status(status_data: dict) -> tuple[Optional[dict], Optional[dict]]:
     try:
         account_data = status_data.get("account", {})
         
-        # Create account dict
+        # Extract domain from acct for analytics
+        acct = account_data.get("acct", "")
+        domain = acct.split('@')[1] if '@' in acct else None
+        is_local = '@' not in acct or not domain
+        
+        # Create account dict with new fields
         account_dict = {
             "id": account_data.get("id"),
             "username": account_data.get("username", ""),
-            "acct": account_data.get("acct", ""),
+            "acct": acct,
             "display_name": account_data.get("display_name", ""),
             "followers_count": account_data.get("followers_count", 0),
             "following_count": account_data.get("following_count", 0),
             "statuses_count": account_data.get("statuses_count", 0),
             "bot": account_data.get("bot", False),
             "avatar_url": account_data.get("avatar"),
+            "is_local": is_local,
+            "domain": domain,
         }
         
         # Extract hashtags
@@ -121,27 +141,32 @@ def parse_status(status_data: dict) -> tuple[Optional[dict], Optional[dict]]:
             "in_reply_to_account_id": status_data.get("in_reply_to_account_id"),
             "reblog_of_id": reblog_of_id,
             "account_id": account_data.get("id"),
+            "account_instance_id": None,  # Will be set during save
             "has_media": has_media,
             "media_types": media_types if media_types else None,
-            "hashtags": hashtags if hashtags else None,
-            "mentions": mentions if mentions else None,
+            "hashtags": hashtags if hashtags else None,  # Keep for backward compat
+            "mentions": mentions if mentions else None,  # Keep for backward compat
             "created_at": created_at,
             "edited_at": edited_at,
         }
         
-        return account_dict, post_dict
+        # Return structured data including hashtags and mentions for normalization
+        return account_dict, post_dict, hashtags, mentions_data
         
     except Exception as e:
         logger.error(f"Error parsing status: {e}")
-        return None, None
+        return None, None, None, None
 
 
-def save_status(account_dict: dict, post_dict: dict):
-    """Save or update account and post in database"""
+def save_status(account_dict: dict, post_dict: dict, hashtags: list, mentions_data: list):
+    """Save or update account and post in database with normalized hashtags and mentions"""
+    instance_id = get_instance_id()
+    
     with get_db_session() as db:
         # Upsert account
         existing_account = db.query(MastodonAccount).filter(
-            MastodonAccount.id == account_dict["id"]
+            MastodonAccount.id == account_dict["id"],
+            MastodonAccount.instance_id == instance_id
         ).first()
         
         if existing_account:
@@ -153,35 +178,196 @@ def save_status(account_dict: dict, post_dict: dict):
             existing_account.statuses_count = account_dict["statuses_count"]
             existing_account.bot = account_dict["bot"]
             existing_account.avatar_url = account_dict["avatar_url"]
+            existing_account.is_local = account_dict["is_local"]
+            existing_account.domain = account_dict["domain"]
             existing_account.last_seen_at = datetime.now(timezone.utc)
         else:
+            account_dict["instance_id"] = instance_id
             db.add(MastodonAccount(**account_dict))
         
         # Upsert post
+        post_dict["instance_id"] = instance_id
+        post_dict["account_instance_id"] = instance_id
+        
         existing_post = db.query(MastodonPost).filter(
-            MastodonPost.id == post_dict["id"]
+            MastodonPost.id == post_dict["id"],
+            MastodonPost.instance_id == instance_id
         ).first()
         
+        is_new_post = existing_post is None
+        is_edit = False
+        
         if existing_post:
+            # Check if this is an edit (content changed)
+            is_edit = (
+                existing_post.content != post_dict["content"] or
+                existing_post.edited_at != post_dict["edited_at"]
+            )
+            
+            # If edited, create a version entry
+            if is_edit and existing_post.edited_at != post_dict["edited_at"]:
+                # Find the next version sequence number (robust against race conditions)
+                max_version = db.query(func.coalesce(func.max(PostVersion.version_seq), 0)).filter(
+                    PostVersion.instance_id == instance_id,
+                    PostVersion.post_id == post_dict["id"]
+                ).scalar()
+                
+                version = PostVersion(
+                    instance_id=instance_id,
+                    post_id=post_dict["id"],
+                    version_seq=max_version + 1,
+                    valid_from=post_dict["edited_at"] or datetime.now(timezone.utc),
+                    content_html=post_dict["content"],
+                    content_text=post_dict["content_text"],
+                    spoiler_text=post_dict["spoiler_text"],
+                    sensitive=post_dict["sensitive"],
+                    hashtags_json=hashtags,
+                    mentions_json=[m.get("acct") for m in mentions_data] if mentions_data else [],
+                    edited_at=post_dict["edited_at"]
+                )
+                db.add(version)
+            
             # Update engagement metrics
             existing_post.reblogs_count = post_dict["reblogs_count"]
             existing_post.favourites_count = post_dict["favourites_count"]
             existing_post.replies_count = post_dict["replies_count"]
             existing_post.engagement_score = post_dict["engagement_score"]
             existing_post.edited_at = post_dict["edited_at"]
+            existing_post.content = post_dict["content"]
+            existing_post.content_text = post_dict["content_text"]
         else:
             db.add(MastodonPost(**post_dict))
+            db.flush()  # Ensure post is created before adding relationships
+        
+        # Create metric snapshot for time-series tracking
+        snapshot = PostMetricSnapshot(
+            instance_id=instance_id,
+            post_id=post_dict["id"],
+            captured_at=datetime.now(timezone.utc),
+            replies_count=post_dict["replies_count"],
+            reblogs_count=post_dict["reblogs_count"],
+            favourites_count=post_dict["favourites_count"],
+            engagement_score=post_dict["engagement_score"]
+        )
+        db.add(snapshot)
+        
+        # Normalize hashtags (only for new posts or edits)
+        if is_new_post or is_edit:
+            # Clear existing associations if this is an edit
+            if is_edit:
+                db.query(PostHashtag).filter(
+                    PostHashtag.instance_id == instance_id,
+                    PostHashtag.post_id == post_dict["id"]
+                ).delete()
+            
+            for tag_name in hashtags:
+                # Get or create hashtag
+                tag_name_lower = tag_name.lower()
+                hashtag = db.query(Hashtag).filter(
+                    Hashtag.instance_id == instance_id,
+                    Hashtag.name == tag_name_lower
+                ).first()
+                
+                if not hashtag:
+                    hashtag = Hashtag(
+                        instance_id=instance_id,
+                        name=tag_name_lower,
+                        first_seen_at=datetime.now(timezone.utc),
+                        last_seen_at=datetime.now(timezone.utc)
+                    )
+                    db.add(hashtag)
+                    db.flush()
+                else:
+                    hashtag.last_seen_at = datetime.now(timezone.utc)
+                
+                # Create association
+                post_hashtag = PostHashtag(
+                    instance_id=instance_id,
+                    post_id=post_dict["id"],
+                    hashtag_id=hashtag.id
+                )
+                db.add(post_hashtag)
+            
+            # Normalize mentions (only for new posts or edits)
+            if is_edit:
+                db.query(PostMention).filter(
+                    PostMention.instance_id == instance_id,
+                    PostMention.post_id == post_dict["id"]
+                ).delete()
+            
+            for mention_obj in mentions_data:
+                mention_acct = mention_obj.get("acct", "")
+                if not mention_acct:
+                    continue
+                
+                # Extract info
+                username = mention_obj.get("username", mention_acct.split('@')[0])
+                
+                # Try to find the mentioned account - if not found, skip this mention
+                # (Foreign key constraint requires the account to exist)
+                mentioned_account_id = mention_obj.get("id")
+                if not mentioned_account_id:
+                    continue
+                
+                # Only create mention if we have a valid account ID
+                # The mentioned account should already exist from the mention object in the status
+                post_mention = PostMention(
+                    instance_id=instance_id,
+                    post_id=post_dict["id"],
+                    mentioned_account_id=mentioned_account_id,
+                    mentioned_account_instance_id=instance_id,
+                    mentioned_acct=mention_acct,
+                    mentioned_username=username
+                )
+                try:
+                    db.add(post_mention)
+                except Exception as e:
+                    # If FK constraint fails, the mentioned account doesn't exist yet
+                    # This is OK - we'll pick it up when that account posts
+                    logger.debug(f"Could not create mention for {mention_acct}: {e}")
 
 
 async def process_event(event_type: str, payload: str):
     """Process a streaming event"""
+    instance_id = get_instance_id()
+    
+    # Log the stream event for replay/debugging
+    try:
+        with get_db_session() as db:
+            # Parse payload to extract IDs
+            payload_data = None
+            payload_status_id = None
+            payload_account_id = None
+            
+            try:
+                if event_type != "delete":
+                    payload_data = json.loads(payload)
+                    payload_status_id = payload_data.get("id")
+                    payload_account_id = payload_data.get("account", {}).get("id")
+                else:
+                    payload_status_id = payload  # Delete events just send the ID
+            except:
+                pass
+            
+            stream_event = StreamEvent(
+                instance_id=instance_id,
+                received_at=datetime.now(timezone.utc),
+                event_type=event_type,
+                payload=payload_data if payload_data else {"id": payload},
+                payload_status_id=payload_status_id,
+                payload_account_id=payload_account_id
+            )
+            db.add(stream_event)
+    except Exception as e:
+        logger.warning(f"Failed to log stream event: {e}")
+    
     if event_type == "update":
         try:
             status_data = json.loads(payload)
-            account_dict, post_dict = parse_status(status_data)
+            account_dict, post_dict, hashtags, mentions_data = parse_status(status_data)
             
             if account_dict and post_dict:
-                save_status(account_dict, post_dict)
+                save_status(account_dict, post_dict, hashtags, mentions_data)
                 logger.info(
                     f"Saved post {post_dict['id']} by @{account_dict['acct']} "
                     f"(engagement: {post_dict['engagement_score']:.1f})"
@@ -193,17 +379,34 @@ async def process_event(event_type: str, payload: str):
         # Post was edited
         try:
             status_data = json.loads(payload)
-            account_dict, post_dict = parse_status(status_data)
+            account_dict, post_dict, hashtags, mentions_data = parse_status(status_data)
             
             if account_dict and post_dict:
-                save_status(account_dict, post_dict)
+                save_status(account_dict, post_dict, hashtags, mentions_data)
                 logger.info(f"Updated edited post {post_dict['id']}")
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse edited status JSON: {e}")
             
     elif event_type == "delete":
-        # Post was deleted - just log it, keep in DB for analytics
-        logger.info(f"Post deleted: {payload}")
+        # Post was deleted - soft delete (tombstone)
+        try:
+            deleted_post_id = payload
+            with get_db_session() as db:
+                post = db.query(MastodonPost).filter(
+                    MastodonPost.id == deleted_post_id,
+                    MastodonPost.instance_id == instance_id
+                ).first()
+                
+                if post:
+                    post.deleted_at = datetime.now(timezone.utc)
+                    # Optionally redact content for privacy
+                    # post.content = "[deleted]"
+                    # post.content_text = "[deleted]"
+                    logger.info(f"Soft-deleted post {deleted_post_id}")
+                else:
+                    logger.debug(f"Delete event for unknown post {deleted_post_id}")
+        except Exception as e:
+            logger.error(f"Failed to handle delete event: {e}")
 
 
 async def stream_public_timeline():
