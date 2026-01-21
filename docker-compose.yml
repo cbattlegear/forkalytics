@@ -132,7 +132,7 @@ services:
       dockerfile: Dockerfile
     container_name: forkalytics-web
     ports:
-      - "3000:80"
+      - "${WEB_PORT:-3000}:80"
     depends_on:
       - api
     networks:

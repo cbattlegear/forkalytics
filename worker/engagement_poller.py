@@ -69,8 +69,12 @@ def get_posts_to_refresh() -> List[dict]:
         } for post in posts]
 
 
-async def fetch_status_from_api(client: httpx.AsyncClient, status_id: str) -> Optional[dict]:
-    """Fetch a single status from Mastodon API"""
+async def fetch_status_from_api(client: httpx.AsyncClient, status_id: str) -> tuple[Optional[dict], Optional[float]]:
+    """
+    Fetch a single status from Mastodon API.
+    Returns (status_data, rate_limit_wait_seconds).
+    If rate limited, returns (None, seconds_to_wait).
+    """
     try:
         url = f"{MASTODON_INSTANCE}/api/v1/statuses/{status_id}"
         headers = {}
@@ -80,22 +84,36 @@ async def fetch_status_from_api(client: httpx.AsyncClient, status_id: str) -> Op
         response = await client.get(url, headers=headers)
         
         if response.status_code == 200:
-            return response.json()
+            return response.json(), None
         elif response.status_code == 404:
             logger.debug(f"Status {status_id} not found (may be deleted)")
-            return None
+            return None, None
         elif response.status_code == 429:
-            # Rate limited - extract retry-after if available
+            # Rate limited - calculate how long to wait
             retry_after = response.headers.get("X-RateLimit-Reset")
-            logger.warning(f"Rate limited. Retry after: {retry_after}")
-            return None
+            wait_seconds = 60  # Default fallback
+            
+            if retry_after:
+                try:
+                    # Parse ISO 8601 timestamp (e.g., 2026-01-21T17:35:00.022610Z)
+                    reset_time = datetime.fromisoformat(retry_after.replace("Z", "+00:00"))
+                    now = datetime.now(timezone.utc)
+                    wait_seconds = max(1, (reset_time - now).total_seconds() + 1)  # +1 buffer
+                    logger.warning(f"Rate limited. Waiting {wait_seconds:.1f}s until {retry_after}")
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Could not parse rate limit reset time '{retry_after}': {e}")
+                    logger.warning(f"Rate limited. Using default wait of {wait_seconds}s")
+            else:
+                logger.warning(f"Rate limited. No reset time provided, waiting {wait_seconds}s")
+            
+            return None, wait_seconds
         else:
             logger.warning(f"Failed to fetch status {status_id}: HTTP {response.status_code}")
-            return None
+            return None, None
             
     except Exception as e:
         logger.error(f"Error fetching status {status_id}: {e}")
-        return None
+        return None, None
 
 
 def update_post_metrics(post_id: str, new_metrics: dict) -> bool:
@@ -153,7 +171,17 @@ async def poll_engagement_metrics():
                             break
                         
                         # Fetch updated status from API
-                        status_data = await fetch_status_from_api(client, post_info["id"])
+                        status_data, rate_limit_wait = await fetch_status_from_api(client, post_info["id"])
+                        
+                        # Handle rate limiting
+                        if rate_limit_wait:
+                            logger.info(f"Pausing batch due to rate limit, resuming in {rate_limit_wait:.1f}s")
+                            await asyncio.sleep(rate_limit_wait)
+                            # Retry this post after waiting
+                            status_data, rate_limit_wait = await fetch_status_from_api(client, post_info["id"])
+                            if rate_limit_wait:
+                                logger.warning("Still rate limited after waiting, skipping remaining posts in batch")
+                                break
                         
                         if status_data:
                             new_reblogs = status_data.get("reblogs_count", 0)
@@ -231,7 +259,17 @@ async def refresh_single_batch():
         changed_count = 0
         
         for post_info in posts_to_refresh:
-            status_data = await fetch_status_from_api(client, post_info["id"])
+            status_data, rate_limit_wait = await fetch_status_from_api(client, post_info["id"])
+            
+            # Handle rate limiting
+            if rate_limit_wait:
+                logger.info(f"Pausing batch due to rate limit, resuming in {rate_limit_wait:.1f}s")
+                await asyncio.sleep(rate_limit_wait)
+                # Retry this post after waiting
+                status_data, rate_limit_wait = await fetch_status_from_api(client, post_info["id"])
+                if rate_limit_wait:
+                    logger.warning("Still rate limited after waiting, stopping batch")
+                    break
             
             if status_data:
                 new_reblogs = status_data.get("reblogs_count", 0)
