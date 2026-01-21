@@ -141,6 +141,7 @@ class StatsOverview(BaseModel):
     posts_this_hour: int
     avg_engagement: float
     sentiment: SentimentOverview
+    mastodon_instance: str = MASTODON_INSTANCE
 
 
 # Startup event

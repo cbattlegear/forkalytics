@@ -13,3 +13,35 @@ body {
 .stat-card {
   @apply bg-gradient-to-br from-gray-800 to-gray-900 rounded-xl p-6 border border-gray-700;
 }
+
+/* Mastodon post content styling */
+.post-content {
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.post-content a {
+  @apply transition-colors;
+}
+
+.post-content p {
+  @apply my-2;
+}
+
+.post-content p:first-child {
+  @apply mt-0;
+}
+
+.post-content p:last-child {
+  @apply mb-0;
+}
+
+/* Hide Mastodon's invisible text (used for accessibility) */
+.post-content .invisible {
+  @apply hidden;
+}
+
+/* Style ellipsis spans */
+.post-content .ellipsis::after {
+  content: '…';
+}

@@ -121,6 +121,63 @@ const ChefHatIcon = ({ className = "w-6 h-6" }) => (
   </svg>
 )
 
+// Component to render Mastodon HTML content with proper styling
+const PostContent = ({ html, maxLength = 300 }) => {
+  if (!html) return null
+  
+  // Create a temporary element to parse and sanitize HTML
+  const parseContent = (htmlContent) => {
+    // Basic sanitization - only allow safe tags
+    const tempDiv = document.createElement('div')
+    tempDiv.innerHTML = htmlContent
+    
+    // Process all links
+    tempDiv.querySelectorAll('a').forEach(link => {
+      // Ensure links open in new tab
+      link.setAttribute('target', '_blank')
+      link.setAttribute('rel', 'noopener noreferrer')
+      
+      // Style hashtag links
+      if (link.classList.contains('hashtag') || link.href?.includes('/tags/')) {
+        link.className = 'text-purple-400 hover:text-purple-300 hover:underline'
+      }
+      // Style mention links  
+      else if (link.classList.contains('mention') || link.classList.contains('u-url')) {
+        link.className = 'text-blue-400 hover:text-blue-300 hover:underline font-medium'
+      }
+      // Style regular links
+      else {
+        link.className = 'text-blue-400 hover:text-blue-300 hover:underline break-all'
+      }
+    })
+    
+    // Remove invisible spans (Mastodon uses these for screen readers)
+    tempDiv.querySelectorAll('.invisible').forEach(el => el.remove())
+    
+    // Handle ellipsis spans
+    tempDiv.querySelectorAll('.ellipsis').forEach(el => {
+      el.textContent = el.textContent + '…'
+    })
+    
+    return tempDiv.innerHTML
+  }
+  
+  const processedHtml = parseContent(html)
+  
+  // Truncate if needed (approximate - based on text content)
+  const textLength = html.replace(/<[^>]*>/g, '').length
+  const shouldTruncate = textLength > maxLength
+  
+  return (
+    <div 
+      className="text-gray-300 mb-3 post-content prose prose-invert prose-sm max-w-none
+        [&_p]:my-2 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0
+        [&_br]:content-[''] [&_br]:block [&_br]:my-1"
+      dangerouslySetInnerHTML={{ __html: processedHtml }}
+    />
+  )
+}
+
 function App() {
   const [stats, setStats] = useState(null)
   const [overview, setOverview] = useState(null)
@@ -131,6 +188,7 @@ function App() {
   const [hourlyTopics, setHourlyTopics] = useState(null)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('overview')
+  const [mastodonInstance, setMastodonInstance] = useState('https://mastodon.social')
   
   // Historical data state
   const [allSummaries, setAllSummaries] = useState([])
@@ -157,7 +215,13 @@ function App() {
         fetch(`${API_URL}/api/topics/hourly?hours=72`).catch(() => ({ ok: false }))
       ])
 
-      if (statsRes.ok) setStats(await statsRes.json())
+      if (statsRes.ok) {
+        const statsData = await statsRes.json()
+        setStats(statsData)
+        if (statsData.mastodon_instance) {
+          setMastodonInstance(statsData.mastodon_instance)
+        }
+      }
       if (overviewRes.ok) setOverview(await overviewRes.json())
       if (postsRes.ok) setPopularPosts(await postsRes.json())
       if (hourlyRes.ok) setHourlyStats(await hourlyRes.json())
@@ -727,24 +791,68 @@ function App() {
                 </div>
                 <div className="flex items-start gap-3 relative">
                   {post.account.avatar_url && (
-                    <img 
-                      src={post.account.avatar_url} 
-                      alt="" 
-                      className="w-10 h-10 rounded-full ring-2 ring-purple-500/30"
-                    />
+                    <a 
+                      href={`${mastodonInstance}/@${post.account.acct}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex-shrink-0"
+                    >
+                      <img 
+                        src={post.account.avatar_url} 
+                        alt="" 
+                        className="w-10 h-10 rounded-full ring-2 ring-purple-500/30 hover:ring-purple-500/60 transition-all"
+                      />
+                    </a>
                   )}
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="font-semibold">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <a 
+                        href={`${mastodonInstance}/@${post.account.acct}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-semibold hover:text-purple-400 transition-colors"
+                      >
                         {post.account.display_name || post.account.username}
-                      </span>
-                      <span className="text-gray-500 text-sm">@{post.account.acct}</span>
+                      </a>
+                      <a
+                        href={`${mastodonInstance}/@${post.account.acct}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-gray-500 text-sm hover:text-gray-400 transition-colors"
+                      >
+                        @{post.account.acct}
+                      </a>
                       {post.sentiment_label && getSentimentIcon(post.sentiment_label)}
+                      <span className="text-gray-600 text-xs ml-auto" title={formatLocalDateTime(post.created_at)}>
+                        {formatLocalDateTime(post.created_at, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                      </span>
                     </div>
-                    <p className="text-gray-300 mb-3 whitespace-pre-wrap">
-                      {post.content_text?.slice(0, 300)}
-                      {post.content_text?.length > 300 && '...'}
-                    </p>
+                    {post.content ? (
+                      <PostContent html={post.content} maxLength={500} />
+                    ) : (
+                      <p className="text-gray-300 mb-3 whitespace-pre-wrap">
+                        {post.content_text?.slice(0, 300)}
+                        {post.content_text?.length > 300 && '...'}
+                      </p>
+                    )}
+                    {post.hashtags && post.hashtags.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-3">
+                        {post.hashtags.slice(0, 5).map((tag, i) => (
+                          <a
+                            key={i}
+                            href={`${mastodonInstance}/tags/${tag}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded-full hover:bg-purple-500/30 transition-colors"
+                          >
+                            #{tag}
+                          </a>
+                        ))}
+                        {post.hashtags.length > 5 && (
+                          <span className="text-xs text-gray-500">+{post.hashtags.length - 5} more</span>
+                        )}
+                      </div>
+                    )}
                     <div className="flex items-center gap-6 text-sm text-gray-400">
                       <span className="flex items-center gap-1" title="Shares">
                         <Repeat2 className="w-4 h-4" />
@@ -767,7 +875,7 @@ function App() {
                           href={post.url} 
                           target="_blank" 
                           rel="noopener noreferrer"
-                          className="text-blue-400 hover:underline ml-auto flex items-center gap-1"
+                          className="text-blue-400 hover:text-blue-300 hover:underline ml-auto flex items-center gap-1"
                         >
                           View <KnifeIcon className="w-3 h-3" />
                         </a>
